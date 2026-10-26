@@ -7,15 +7,10 @@ VLESS+REALITY / Hysteria2. XHTTP is used instead of WS per the user's
 preference: it is plain HTTP, passes through the tunnel, and
 Shadowrocket supports it. The panel is expected to set $PORT; if it
 does not, we fall back to 8080 and log the port actually used.
-
-Cloudflared is created directly on this server: if no cloudflared
-login certificate is present, `cloudflared tunnel login` is run and
-its authorization URL is printed to the logs, then a tunnel named
-edge-1021 is created on the server, routed to infrlo.kktv.eu.org,
-and run alongside Xray pointing at the local XHTTP port. No token
-is used and no credential is written into this file.
+When CLOUDFLARED_TOKEN is set, cloudflared also runs alongside Xray
+as a named tunnel; the tunnel ingress is configured in Cloudflare
+and points to the local XHTTP port. Otherwise only Xray runs.
 """
-import glob
 import json
 import os
 import stat
@@ -29,9 +24,6 @@ WSPATH = "/ZEj5QoInC5udYjOw"
 PORT = int(os.environ.get("PORT", "8080"))
 XRAY_URL = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 CLOUDFLARED_URL = "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64"
-TUNNEL_NAME = "edge-1021"
-HOSTNAME = "infrlo.kktv.eu.org"
-CF_DIR = os.path.join(os.path.expanduser("~"), ".cloudflared")
 
 
 def ensure_xray():
@@ -58,49 +50,14 @@ def ensure_cloudflared():
     return "./cloudflared"
 
 
-def run_streamed(cmd):
-    print("running: " + " ".join(cmd), flush=True)
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    for line in proc.stdout:
-        print(line, end="", flush=True)
-    code = proc.wait()
-    print(f"command finished with exit code {code}", flush=True)
-    return code
-
-
-def setup_cloudflared():
+def start_cloudflared():
+    token = os.environ.get("CLOUDFLARED_TOKEN", "")
+    if not token:
+        print("CLOUDFLARED_TOKEN is not set; cloudflared will not start", flush=True)
+        return None
     cloudflared = ensure_cloudflared()
-    os.makedirs(CF_DIR, exist_ok=True)
-    cert = os.path.join(CF_DIR, "cert.pem")
-    if not (os.path.exists(cert) and os.path.getsize(cert) > 0):
-        print("cloudflared login required: open the login URL printed next in the logs and authorize the Cloudflare account that owns kktv.eu.org, then this process will continue", flush=True)
-        run_streamed([cloudflared, "tunnel", "login"])
-    if not (os.path.exists(cert) and os.path.getsize(cert) > 0):
-        print("cloudflared login certificate is still missing; cloudflared will not start", flush=True)
-        return None
-    print("cloudflared login certificate present", flush=True)
-    code = run_streamed([cloudflared, "tunnel", "create", TUNNEL_NAME])
-    if code != 0:
-        print("cloudflared tunnel create did not succeed; the tunnel may already exist", flush=True)
-    jsons = glob.glob(os.path.join(CF_DIR, "*.json"))
-    if not jsons:
-        print("no cloudflared tunnel credentials file found; cloudflared will not start", flush=True)
-        return None
-    jsons.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-    tunnel_json = jsons[0]
-    tunnel_id = os.path.splitext(os.path.basename(tunnel_json))[0]
-    print(f"cloudflared tunnel credentials file: {tunnel_json}", flush=True)
-    config_path = os.path.join(CF_DIR, "config.yml")
-    with open(config_path, "w") as f:
-        f.write(f"tunnel: {tunnel_id}\n")
-        f.write(f"credentials-file: {tunnel_json}\n")
-        f.write("ingress:\n")
-        f.write(f"  - hostname: {HOSTNAME}\n")
-        f.write(f"    service: http://127.0.0.1:{PORT}\n")
-        f.write("  - service: http_status:404\n")
-    run_streamed([cloudflared, "tunnel", "route", "dns", "--overwrite-dns", TUNNEL_NAME, HOSTNAME])
     print("starting cloudflared named tunnel", flush=True)
-    return subprocess.Popen([cloudflared, "tunnel", "--config", config_path, "run"])
+    return subprocess.Popen([cloudflared, "tunnel", "run", "--token", token])
 
 
 def main():
@@ -124,7 +81,7 @@ def main():
         json.dump(config, f)
     print(f"starting xray vless+xhttp on port {PORT} path {WSPATH}", flush=True)
     proc = subprocess.Popen([xray, "-config", "config.json"])
-    cf_proc = setup_cloudflared()
+    cf_proc = start_cloudflared()
     try:
         code = proc.wait()
     finally:
